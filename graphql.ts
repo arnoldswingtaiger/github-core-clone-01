@@ -875,7 +875,7 @@ const RESOLVERS: Readonly<Record<string, Readonly<Record<string, Resolver>>>> = 
       const files = (ctx.store.pullFiles(repo, pull) ?? []).slice(0, Math.max(0, Math.min(100, first)));
       return {
         __typename: 'PullRequestChangedFileConnection',
-        nodes: files.map((file) => ({ __typename: 'PullRequestChangedFile', path: file.filename })),
+        nodes: files.map((file) => ({ __typename: 'PullRequestChangedFile', path: file.path })),
       };
     },
   },

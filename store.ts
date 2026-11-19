@@ -378,6 +378,39 @@ export class Store {
     return out;
   }
 
+  /**
+   * The closure of a set of roots without following commit parents: each
+   * commit contributes itself and its tree's closure (trees and blobs), each
+   * tag itself and its target's closure, each tree itself and its entries.
+   * A fetch plans its commit sets first (depth limit, haves, the client's
+   * shallow boundary), then expands exactly those commits to objects: the
+   * parents are the boundary, not the payload, and a held shallow commit's
+   * parents are not held either.
+   */
+  reachableObjectsShallow(repo: Repo, tips: readonly string[]): Map<string, GitObject> {
+    const out = new Map<string, GitObject>();
+    const queue = [...tips];
+    while (queue.length > 0) {
+      const oid = queue.pop() as string;
+      if (out.has(oid)) continue;
+      const object = this.getObject(repo, oid);
+      if (object === undefined) continue;
+      out.set(oid, object);
+      if (object.type === 'commit') {
+        const commit = parseCommit(object.data);
+        queue.push(commit.tree);
+        // No parents: the caller decides which commits belong in the set.
+      } else if (object.type === 'tree') {
+        for (const entry of parseTree(object.data)) {
+          if (entry.mode !== '160000') queue.push(entry.oid);
+        }
+      } else if (object.type === 'tag') {
+        queue.push(parseTag(object.data).object);
+      }
+    }
+    return out;
+  }
+
   // ---------------------------------------------------------- trees
 
   /** Read a path out of a commit's tree: the blob (or subtree) it names. */

@@ -373,10 +373,13 @@ function planFetch(store: Store, repo: Repo, request: FetchRequest): FetchPlan {
   }
 
   // 3. The commits to send, and their objects minus what the client holds.
+  //    The object closure never follows parents: the commit sets above
+  //    already encode the depth limit and the shallow boundary, and a
+  //    parent-following closure would re-add exactly what those cut off.
   const sendCommits = [...generations.keys()].filter((oid) => !haveSet.has(oid));
   const sendSet = new Set(sendCommits);
-  const heldObjects = store.reachableObjects(repo, [...haveSet]);
-  const sendObjects = store.reachableObjects(repo, [...sendCommits, ...wantTags]);
+  const heldObjects = store.reachableObjectsShallow(repo, [...haveSet]);
+  const sendObjects = store.reachableObjectsShallow(repo, [...sendCommits, ...wantTags]);
   const objects: GitObject[] = [];
   for (const [oid, object] of sendObjects) {
     if (!heldObjects.has(oid)) objects.push(object);
