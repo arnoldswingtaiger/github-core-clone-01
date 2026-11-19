@@ -15,6 +15,7 @@
 //      reads.
 //
 // main.ts imports its own server and nothing else: no package, no Node built-in, no model call.
+// The server it builds is the forge itself: git smart HTTP, REST v3, GraphQL v4 and MCP in one process.
 
 import { createApp } from './app.ts';
 

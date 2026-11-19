@@ -1,49 +1,115 @@
-// The starter's HTTP surface, exactly as it ships: a health probe and an API root, and a JSON 404
-// for everything else. The contest's real surface — git smart HTTP, REST v3 resources, GraphQL v4 and
-// the MCP endpoint — is what you add (README.md names it, and the rules link below says what scores).
+// The forge's dispatcher: one server, four surfaces, one store.
 //
-// app.ts is deliberately separate from main.ts: this is the server, the file you grow; main.ts is the
-// entry <-> env lifecycle and should stay as it is.
+//   GET  /healthz             the env's boot probe: 200 {"ok":true}, no token
+//   *    /api/v3/*            the REST v3 API (rest.ts), token required past the root
+//   POST /api/graphql         the GraphQL v4 API (graphql.ts), token required
+//   POST /mcp                 the MCP endpoint (mcp.ts), token required
+//   *    /{owner}/{repo}.git  git smart HTTP (gitproto.ts), token required
+//   *    anything else        a JSON 404 with a request id, never HTML
+//
+// The bearer token is MAKEFUN_SHOP_TOKEN, read once at startup; every surface
+// compares against it (an empty token skips auth, for local smoke tests).
+// A handler that throws answers 500 JSON and the server stays up: the suite
+// drives the forge as a client, and a crashed server fails every check after.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { handleGit } from './gitproto.ts';
+import { handleRest } from './rest.ts';
+import { handleMcp } from './mcp.ts';
+import { handleGraphQL } from './graphql.ts';
+import { nextRequestId, pathSegments, readBody, sendJson } from './http.ts';
 
-const JSON_TYPE = 'application/json; charset=utf-8';
+/** The token the suite presents; '' when the env did not set one. */
+const TOKEN = process.env.MAKEFUN_SHOP_TOKEN ?? '';
 
-/** Answer one request with a JSON body; `headers` go beside the JSON ones. */
-function sendJson(res: ServerResponse, status: number, body: unknown, headers: Readonly<Record<string, string>> = {}): void {
-  const text = `${JSON.stringify(body)}\n`;
-  res.writeHead(status, { 'content-type': JSON_TYPE, 'content-length': Buffer.byteLength(text), ...headers });
-  res.end(text);
-}
-
-/** The path of a request URL, or '/' when it does not parse (never a throw from a request). */
-function pathOf(req: IncomingMessage): string {
+/** Parse a request URL, or null when it does not parse (never a throw). */
+function urlOf(req: IncomingMessage): URL | null {
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    return new URL(req.url ?? '/', 'http://entry');
   } catch {
-    return '/';
+    return null;
   }
 }
 
 /** Build the server. It binds nothing until the caller listens; the entry listens on an ephemeral port. */
 export function createApp(): Server {
   return createServer((req: IncomingMessage, res: ServerResponse) => {
-    const path = pathOf(req);
+    const requestId = nextRequestId();
     const method = req.method ?? 'GET';
+    const url = urlOf(req);
+    const path = url === null ? '/' : url.pathname;
+    const segments = url === null ? [] : pathSegments(url);
 
-    // The env's boot check calls this twice: 200 {"ok":true}.
+    // The env's boot check calls this twice: 200 {"ok":true}, no token, no body.
     if (method === 'GET' && path === '/healthz') {
-      sendJson(res, 200, { ok: true });
+      sendJson(res, 200, { ok: true }, requestId);
       return;
     }
 
-    // The GitHub API root: a 200 with the token's scopes, as api.github.com answers GET /.
-    if (method === 'GET' && (path === '/api/v3' || path === '/api/v3/')) {
-      sendJson(res, 200, { current_user_url: '/api/v3/user', rate_limit_url: '/api/v3/rate_limit' }, { 'x-oauth-scopes': 'repo, read:org' });
-      return;
-    }
+    // Everything else reads the body first; the handlers take the buffer.
+    readBody(req)
+      .then((body) => {
+        try {
+          // REST v3: /api/v3 and everything under it.
+          if (segments[0] === 'api' && segments[1] === 'v3') {
+            handleRest(
+              {
+                req,
+                res,
+                method,
+                segments: segments.slice(2),
+                query: url === null ? new URLSearchParams() : url.searchParams,
+                body,
+                requestId,
+                host: req.headers.host ?? 'entry',
+                pathname: path,
+              },
+              TOKEN,
+            );
+            return;
+          }
 
-    // Everything else, every method: GitHub's 404 body.
-    sendJson(res, 404, { message: 'Not Found' });
+          // GraphQL v4: POST /api/graphql.
+          if (segments[0] === 'api' && segments[1] === 'graphql' && segments.length === 2) {
+            handleGraphQL({ req, res, method, body, requestId }, TOKEN);
+            return;
+          }
+
+          // MCP: POST /mcp.
+          if (segments[0] === 'mcp' && segments.length === 1) {
+            handleMcp({ req, res, method, body, requestId }, TOKEN);
+            return;
+          }
+
+          // Git smart HTTP: /{owner}/{repo}.git/... — the second segment ends in .git.
+          if (segments.length >= 2 && (segments[1] as string).endsWith('.git')) {
+            handleGit(
+              {
+                req,
+                res,
+                method,
+                segments,
+                query: url === null ? new URLSearchParams() : url.searchParams,
+                body,
+                requestId,
+              },
+              TOKEN,
+            );
+            return;
+          }
+
+          // Everything else, every method: GitHub's 404 body, as JSON.
+          sendJson(res, 404, { message: 'Not Found' }, requestId);
+        } catch (err) {
+          if (!res.writableEnded) {
+            sendJson(res, 500, { message: err instanceof Error ? err.message : 'Internal Server Error' }, requestId);
+          }
+        }
+      })
+      .catch(() => {
+        if (!res.writableEnded) {
+          sendJson(res, 400, { message: 'Bad Request' }, requestId);
+        }
+      });
   });
 }
